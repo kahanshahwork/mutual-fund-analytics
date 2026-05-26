@@ -6,7 +6,11 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "mf:schemes":   "npx tsx python-pipeline/sync_schemes.ts",
+    "mf:nav":       "npx tsx python-pipeline/sync_nav.ts",
+    "mf:nav:today": "npx tsx python-pipeline/sync_nav.ts --today",
+    "mf:compute":   "npx tsx python-pipeline/compute_metrics.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.5.1",
@@ -22,6 +26,7 @@
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.1",
     "date-fns": "^3.6.0",
+    "dotenv": "^16.4.5",
     "lucide-react": "^0.460.0",
     "next": "15.0.3",
     "react": "^18.3.1",
@@ -38,6 +43,7 @@
     "eslint-config-next": "15.0.3",
     "postcss": "^8",
     "tailwindcss": "^3.4.1",
+    "tsx": "^4.19.1",
     "typescript": "^5"
   }
 }
