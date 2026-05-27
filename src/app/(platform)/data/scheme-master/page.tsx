@@ -219,7 +219,7 @@ export default function SchemeMasterPage() {
                 ) : schemes.length === 0 ? (
                   <tr>
                     <td colSpan={6} className="px-3 py-12 text-center text-sm text-muted-foreground">
-                      No schemes found. Run the Python pipeline to sync data.
+                      No schemes found. Run: npm run mf:schemes
                     </td>
                   </tr>
                 ) : (

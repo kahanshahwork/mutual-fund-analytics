@@ -606,7 +606,7 @@ export default function FundOverviewPage() {
                   </ResponsiveContainer>
                 ) : (
                   <div className="h-64 flex items-center justify-center text-sm text-muted-foreground">
-                    No NAV data. Run the Python pipeline to load data.
+                    No NAV data. Run: npm run mf:nav
                   </div>
                 )}
               </div>
@@ -699,7 +699,7 @@ export default function FundOverviewPage() {
                 {!riskMetrics && !loading && (
                   <div className="bg-muted/50 rounded-lg p-4 text-xs text-muted-foreground text-center">
                     Risk metrics not yet computed. Run{" "}
-                    <code className="font-mono">compute_metrics.py</code> after
+                    <code className="font-mono">npm run mf:compute</code> after
                     loading NAV data.
                   </div>
                 )}

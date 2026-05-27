@@ -64,7 +64,7 @@ export default async function NavSyncPage() {
             <div className="py-16 text-center">
               <RefreshCw size={24} className="text-muted-foreground mx-auto mb-3" />
               <p className="text-sm text-muted-foreground">No syncs yet.</p>
-              <p className="text-xs text-muted-foreground mt-1">Run sync_nav.py to start populating data.</p>
+              <p className="text-xs text-muted-foreground mt-1">Run: npm run mf:nav to start populating data.</p>
             </div>
           ) : (
             <table className="w-full text-sm">

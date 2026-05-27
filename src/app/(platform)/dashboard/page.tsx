@@ -69,7 +69,7 @@ export default async function DashboardPage() {
             icon={<AlertCircle size={18} className="text-muted-foreground" />}
             label="Analytics engine"
             value={analyticsReady ? "Ready" : "Pending"}
-            sub={analyticsReady ? `${stats.rollingMetricsCount.toLocaleString()} rolling records` : "Run compute_metrics.py"}
+            sub={analyticsReady ? `${stats.rollingMetricsCount.toLocaleString()} rolling records` : "Run: npm run mf:compute"}
           />
         </div>
 
@@ -80,9 +80,9 @@ export default async function DashboardPage() {
             <ChecklistItem done label="Next.js project scaffold" />
             <ChecklistItem done label="Supabase schema created" />
             <ChecklistItem done label="Authentication configured" />
-            <ChecklistItem done={stats.totalSchemes > 0} label="Scheme master synced — run: python sync_schemes.py" />
-            <ChecklistItem done={stats.totalNavRows > 0} label="NAV history loaded — run: python sync_nav.py" />
-            <ChecklistItem done={analyticsReady} label="Analytics computed — run: python compute_metrics.py" />
+            <ChecklistItem done={stats.totalSchemes > 0} label="Scheme master synced — run: npm run mf:schemes" />
+            <ChecklistItem done={stats.totalNavRows > 0} label="NAV history loaded — run: npm run mf:nav" />
+            <ChecklistItem done={analyticsReady} label="Analytics computed — run: npm run mf:compute" />
           </div>
         </div>
 

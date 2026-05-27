@@ -277,7 +277,7 @@ export default function CategoryMappingPage() {
                       className="px-4 py-12 text-center text-sm text-muted-foreground"
                     >
                       {rows.length === 0
-                        ? "No categories found. Run the Python pipeline to sync schemes."
+                        ? "No categories found. Run: npm run mf:schemes"
                         : "No matching categories."}
                     </td>
                   </tr>
