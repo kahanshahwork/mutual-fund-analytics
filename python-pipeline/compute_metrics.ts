@@ -1,14 +1,17 @@
 #!/usr/bin/env npx tsx
 /**
- * ENGINE 3: COMPUTE METRICS
+ * ENGINE 3: COMPUTE METRICS (Live NAV version)
  * ─────────────────────────────────────────────────────────────────
  * Run: npm run mf:compute
  *
- * Uses the same hardcoded 1,534 scheme codes — no DB query for the
- * list, so no Supabase 1,000 row limit issue.
+ * Fetches NAV history LIVE from mfapi.in for each scheme.
+ * Does NOT store nav_history in DB — computes everything in memory
+ * and writes only precomputed analytics to Supabase.
  *
- * Pure TypeScript math — no numpy, no pandas, no Python.
- * Writes into: rolling_return_metrics, risk_metrics, sip_metrics, fund_scores
+ * Tables written:
+ *   rolling_return_metrics, risk_metrics, sip_metrics, fund_scores
+ *
+ * DB storage: ~50MB total (vs 600MB with nav_history)
  */
 
 import { createClient } from '@supabase/supabase-js'
@@ -22,10 +25,12 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 )
 
-const RF    = 6.5   // risk-free rate %
-const CHUNK = 200
+const MFAPI  = 'https://api.mfapi.in/mf'
+const RF     = 6.5
+const CHUNK  = 200
+const DELAY  = 80   // ms between mfapi requests
 
-// ── Same curated list as sync_schemes.ts / sync_nav.ts ────────────────────────
+// ── Curated scheme list ────────────────────────────────────────────────────────
 
 const SCHEME_CODES = [
   100033,
@@ -1570,6 +1575,31 @@ const ALL_CODES = [...new Set(SCHEME_CODES)]
 
 type NavRow = { nav_date: string; nav: number }
 
+// ── mfapi fetch ────────────────────────────────────────────────────────────────
+
+function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)) }
+
+function parseDate(s: string): string {
+  const [d, m, y] = s.split('-')
+  return `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`
+}
+
+async function fetchNav(code: number): Promise<NavRow[] | null> {
+  try {
+    const res = await fetch(`${MFAPI}/${code}`)
+    if (!res.ok) return null
+    const json = await res.json()
+    if (json.status !== 'SUCCESS' || !json.data?.length) return null
+    const rows: NavRow[] = json.data
+      .map((r: any) => ({ nav_date: parseDate(r.date), nav: parseFloat(r.nav) }))
+      .filter((r: NavRow) => r.nav > 0)
+      .sort((a: NavRow, b: NavRow) => a.nav_date.localeCompare(b.nav_date))
+    return rows.length ? rows : null
+  } catch {
+    return null
+  }
+}
+
 // ── Math helpers ───────────────────────────────────────────────────────────────
 
 function navAt(data: NavRow[], target: Date, tolDays = 20): number | null {
@@ -1584,9 +1614,7 @@ function navAt(data: NavRow[], target: Date, tolDays = 20): number | null {
 }
 
 function ago(years: number, from: Date): Date {
-  const d = new Date(from)
-  d.setFullYear(d.getFullYear() - years)
-  return d
+  const d = new Date(from); d.setFullYear(d.getFullYear() - years); return d
 }
 
 function cagr(start: number | null, end: number, years: number): number | null {
@@ -1600,12 +1628,11 @@ function volatility(data: NavRow[]): number | null {
   const sorted = [...data].sort((a, b) => a.nav_date.localeCompare(b.nav_date))
   const rets: number[] = []
   for (let i = 1; i < sorted.length; i++) {
-    const prev = Number(sorted[i - 1].nav)
-    const curr = Number(sorted[i].nav)
+    const prev = Number(sorted[i-1].nav), curr = Number(sorted[i].nav)
     if (prev > 0) rets.push((curr - prev) / prev)
   }
   if (rets.length < 20) return null
-  const mean     = rets.reduce((s, r) => s + r, 0) / rets.length
+  const mean = rets.reduce((s, r) => s + r, 0) / rets.length
   const variance = rets.reduce((s, r) => s + Math.pow(r - mean, 2), 0) / rets.length
   return Math.round(Math.sqrt(variance) * Math.sqrt(252) * 100 * 100) / 100
 }
@@ -1613,8 +1640,7 @@ function volatility(data: NavRow[]): number | null {
 function maxDrawdown(data: NavRow[]): number | null {
   if (data.length < 2) return null
   const sorted = [...data].sort((a, b) => a.nav_date.localeCompare(b.nav_date))
-  let peak = Number(sorted[0].nav)
-  let mdd  = 0
+  let peak = Number(sorted[0].nav), mdd = 0
   for (const r of sorted) {
     const n = Number(r.nav)
     if (n > peak) peak = n
@@ -1628,16 +1654,14 @@ function downsideDev(data: NavRow[]): number | null {
   const sorted = [...data].sort((a, b) => a.nav_date.localeCompare(b.nav_date))
   const rets: number[] = []
   for (let i = 1; i < sorted.length; i++) {
-    const prev = Number(sorted[i - 1].nav)
-    const curr = Number(sorted[i].nav)
+    const prev = Number(sorted[i-1].nav), curr = Number(sorted[i].nav)
     if (prev > 0) rets.push((curr - prev) / prev)
   }
   if (rets.length < 30) return null
   const mar = RF / 100 / 252
   const neg = rets.filter(r => r < mar).map(r => Math.pow(r - mar, 2))
   if (!neg.length) return 0
-  const dd = Math.sqrt(neg.reduce((s, v) => s + v, 0) / rets.length) * Math.sqrt(252) * 100
-  return Math.round(dd * 100) / 100
+  return Math.round(Math.sqrt(neg.reduce((s, v) => s + v, 0) / rets.length) * Math.sqrt(252) * 100 * 100) / 100
 }
 
 function ulcerIndex(data: NavRow[]): number | null {
@@ -1653,46 +1677,39 @@ function ulcerIndex(data: NavRow[]): number | null {
   return Math.round(Math.sqrt(dds.reduce((s, v) => s + v, 0) / dds.length) * 100) / 100
 }
 
-function rollingReturns(data: NavRow[], years: number): {
-  avg: number; median: number; min: number; max: number; positivePct: number; dataPoints: number
-} | null {
+function rollingReturns(data: NavRow[], years: number) {
   if (data.length < 30) return null
   const sorted = [...data].sort((a, b) => a.nav_date.localeCompare(b.nav_date))
-  const ms     = years * 365.25 * 86_400_000
+  const ms = years * 365.25 * 86_400_000
   const results: number[] = []
   const step = Math.max(1, Math.floor(sorted.length / 200))
-
   for (let i = 0; i < sorted.length; i += step) {
     const endTarget = new Date(new Date(sorted[i].nav_date).getTime() + ms)
-    const endNav    = navAt(sorted, endTarget, 20)
+    const endNav = navAt(sorted, endTarget, 20)
     if (!endNav) continue
     const r = cagr(Number(sorted[i].nav), endNav, years)
     if (r !== null) results.push(r)
   }
-
   if (results.length < 5) return null
-  const sorted2     = [...results].sort((a, b) => a - b)
-  const avg         = results.reduce((s, v) => s + v, 0) / results.length
-  const median      = sorted2[Math.floor(sorted2.length / 2)]
-  const positivePct = results.filter(r => r > 0).length / results.length * 100
-
+  const s = [...results].sort((a, b) => a - b)
+  const avg = results.reduce((a, v) => a + v, 0) / results.length
   return {
     avg:         Math.round(avg * 100) / 100,
-    median:      Math.round(median * 100) / 100,
-    min:         Math.round(sorted2[0] * 100) / 100,
-    max:         Math.round(sorted2[sorted2.length - 1] * 100) / 100,
-    positivePct: Math.round(positivePct * 100) / 100,
+    median:      Math.round(s[Math.floor(s.length / 2)] * 100) / 100,
+    min:         Math.round(s[0] * 100) / 100,
+    max:         Math.round(s[s.length - 1] * 100) / 100,
+    positivePct: Math.round(results.filter(r => r > 0).length / results.length * 100 * 100) / 100,
     dataPoints:  results.length,
   }
 }
 
 function sipXirr(data: NavRow[], years: number): number | null {
-  const sorted     = [...data].sort((a, b) => a.nav_date.localeCompare(b.nav_date))
+  const sorted = [...data].sort((a, b) => a.nav_date.localeCompare(b.nav_date))
   if (sorted.length < 30) return null
   const latestDate = new Date(sorted[sorted.length - 1].nav_date)
   const latestNav  = Number(sorted[sorted.length - 1].nav)
   const startDate  = ago(years, latestDate)
-  let units = 0; let months = 0
+  let units = 0, months = 0
   const cursor = new Date(startDate)
   while (cursor <= latestDate) {
     const n = navAt(sorted, cursor, 15)
@@ -1703,35 +1720,32 @@ function sipXirr(data: NavRow[], years: number): number | null {
   return cagr(months * 10_000, units * latestNav, months / 12)
 }
 
-function compositeScore(params: {
+function compositeScore(p: {
   cagr5y: number | null; sharpe3y: number | null; sortino3y: number | null
   rolling3yPct: number | null; maxDd: number | null; sip5yXirr: number | null
 }): number {
-  let score = 0; let w = 0
+  let score = 0, w = 0
   function add(v: number | null, weight: number, norm: (n: number) => number) {
-    if (v == null) return
-    score += norm(v) * weight; w += weight
+    if (v == null) return; score += norm(v) * weight; w += weight
   }
-  add(params.cagr5y,       25, v => Math.min(100, Math.max(0, v / 20 * 100)))
-  add(params.sharpe3y,     20, v => Math.min(100, Math.max(0, (v + 1) / 3 * 100)))
-  add(params.sortino3y,    15, v => Math.min(100, Math.max(0, (v + 1) / 4 * 100)))
-  add(params.rolling3yPct, 20, v => Math.min(100, Math.max(0, v)))
-  add(params.maxDd,        10, v => Math.min(100, Math.max(0, (v + 50) / 50 * 100)))
-  add(params.sip5yXirr,    10, v => Math.min(100, Math.max(0, v / 20 * 100)))
+  add(p.cagr5y,       25, v => Math.min(100, Math.max(0, v / 20 * 100)))
+  add(p.sharpe3y,     20, v => Math.min(100, Math.max(0, (v + 1) / 3 * 100)))
+  add(p.sortino3y,    15, v => Math.min(100, Math.max(0, (v + 1) / 4 * 100)))
+  add(p.rolling3yPct, 20, v => Math.min(100, Math.max(0, v)))
+  add(p.maxDd,        10, v => Math.min(100, Math.max(0, (v + 50) / 50 * 100)))
+  add(p.sip5yXirr,    10, v => Math.min(100, Math.max(0, v / 20 * 100)))
   return w > 0 ? Math.round(score / w * 100) / 100 : 0
 }
 
 function progressBar(current: number, total: number, width = 40): string {
-  const pct    = current / total
-  const filled = Math.round(width * pct)
+  const pct = current / total, filled = Math.round(width * pct)
   return `[${'█'.repeat(filled)}${'░'.repeat(width - filled)}] ${String(current).padStart(4)}/${total} (${Math.round(pct * 100)}%)`
 }
 
 async function upsertChunked(table: string, records: object[], onConflict: string) {
   for (let i = 0; i < records.length; i += CHUNK) {
     const { error } = await supabase
-      .from(table)
-      .upsert(records.slice(i, i + CHUNK) as any, { onConflict })
+      .from(table).upsert(records.slice(i, i + CHUNK) as any, { onConflict })
     if (error) console.error(`  Upsert error on ${table}:`, error.message)
   }
 }
@@ -1741,42 +1755,35 @@ async function upsertChunked(table: string, records: object[], onConflict: strin
 async function main() {
   console.log('\n╔══════════════════════════════════════════════════════╗')
   console.log('║   MF Platform — ENGINE 3: COMPUTE METRICS           ║')
+  console.log('║   Live NAV mode — no nav_history stored in DB       ║')
   console.log('╚══════════════════════════════════════════════════════╝')
-  console.log(`  Schemes : ${ALL_CODES.length} (hardcoded list — no DB query)`)
-  console.log(`  Started : ${new Date().toLocaleString('en-IN')}`)
-  console.log('  No Python. No numpy. Pure TypeScript.\n')
+  console.log(`  Schemes : ${ALL_CODES.length} (curated list)`)
+  console.log(`  Started : ${new Date().toLocaleString('en-IN')}\n`)
 
-  // Load category map from schemes table (needed for ranking)
+  // Load category map
   const categoryMap: Record<number, string> = {}
   for (let i = 0; i < ALL_CODES.length; i += 1000) {
-    const batch = ALL_CODES.slice(i, i + 1000)
-    const { data } = await supabase.from('schemes').select('scheme_code, category').in('scheme_code', batch)
+    const { data } = await supabase.from('schemes').select('scheme_code, category').in('scheme_code', ALL_CODES.slice(i, i + 1000))
     if (data) for (const s of data) categoryMap[s.scheme_code] = s.category ?? 'Other'
   }
 
   const startTime = Date.now()
-  const allRolling:  object[] = []
-  const allRisk:     object[] = []
-  const allSip:      object[] = []
-  const allScores:   Map<number, any> = new Map()
-  let computed = 0; let skipped = 0; let errors = 0
+  const allRolling: object[] = [], allRisk: object[] = [], allSip: object[] = []
+  const allScores = new Map<number, any>()
+  let computed = 0, skipped = 0, errors = 0
 
   for (let i = 0; i < ALL_CODES.length; i++) {
     const code = ALL_CODES[i]
     try {
-      const { data: navData, error: ne } = await supabase
-        .from('nav_history')
-        .select('nav_date, nav')
-        .eq('scheme_code', code)
-        .order('nav_date', { ascending: true })
+      const data = await fetchNav(code)
+      await sleep(DELAY)
 
-      if (ne || !navData || navData.length < 30) {
+      if (!data || data.length < 30) {
         skipped++
         process.stdout.write(`\r  ${progressBar(i + 1, ALL_CODES.length)}  skipped: ${skipped}`)
         continue
       }
 
-      const data      = navData as NavRow[]
       const latest    = data[data.length - 1]
       const latestNav = Number(latest.nav)
       const latestDt  = new Date(latest.nav_date)
@@ -1784,7 +1791,7 @@ async function main() {
       const now       = new Date().toISOString()
 
       // Rolling returns
-      const rollingRecords: any[] = []
+      const rollingRecs: any[] = []
       for (const yrs of [1, 3, 5, 7, 10] as const) {
         if (yearsData < yrs * 1.1) continue
         const r = rollingReturns(data, yrs)
@@ -1796,20 +1803,18 @@ async function main() {
           positive_return_pct: r.positivePct, benchmark_outperform_pct: null,
           consistency_score: r.positivePct, data_points: r.dataPoints, computed_at: now,
         }
-        allRolling.push(rec); rollingRecords.push(rec)
+        allRolling.push(rec); rollingRecs.push(rec)
       }
 
       // Risk metrics
-      const riskRecords: any[] = []
+      const riskRecs: any[] = []
       for (const yrs of [1, 3, 5, 10] as const) {
         if (yearsData < yrs * 0.9) continue
         const cutoff = ago(yrs, latestDt)
         const slice  = data.filter(r => new Date(r.nav_date) >= cutoff)
         if (slice.length < 30) continue
-        const vol = volatility(slice)
-        const mdd = maxDrawdown(slice)
-        const dd  = downsideDev(slice)
-        const ui  = ulcerIndex(slice)
+        const vol = volatility(slice), mdd = maxDrawdown(slice)
+        const dd  = downsideDev(slice), ui = ulcerIndex(slice)
         const c   = cagr(navAt(slice, cutoff, 30), latestNav, yrs)
         const sh  = (c !== null && vol && vol > 0) ? Math.round((c - RF) / vol * 100) / 100 : null
         const so  = (c !== null && dd  && dd  > 0) ? Math.round((c - RF) / dd  * 100) / 100 : null
@@ -1819,11 +1824,11 @@ async function main() {
           sharpe_ratio: sh, sortino_ratio: so, max_drawdown: mdd,
           downside_deviation: dd, ulcer_index: ui, calmar_ratio: cal, computed_at: now,
         }
-        allRisk.push(rec); riskRecords.push(rec)
+        allRisk.push(rec); riskRecs.push(rec)
       }
 
       // SIP metrics
-      const sipRecords: any[] = []
+      const sipRecs: any[] = []
       for (const yrs of [1, 3, 5, 7, 10] as const) {
         if (yearsData < yrs * 0.9) continue
         const xirr = sipXirr(data, yrs)
@@ -1835,22 +1840,19 @@ async function main() {
           positive_sip_pct: xirr > 0 ? 100 : 0,
           rolling_sip_consistency: null, computed_at: now,
         }
-        allSip.push(rec); sipRecords.push(rec)
+        allSip.push(rec); sipRecs.push(rec)
       }
 
-      // Composite score
+      // Score
       const c5y    = cagr(navAt(data, ago(5, latestDt), 30), latestNav, 5)
-      const risk3y = riskRecords.find((r: any) => r.period_years === 3)
-      const roll3y = rollingRecords.find((r: any) => r.rolling_period_years === 3)
-      const sip5y  = sipRecords.find((s: any) => s.sip_period_years === 5)
-
-      const score = compositeScore({
-        cagr5y:       c5y,
-        sharpe3y:     risk3y?.sharpe_ratio ?? null,
-        sortino3y:    risk3y?.sortino_ratio ?? null,
+      const risk3y = riskRecs.find(r => r.period_years === 3)
+      const roll3y = rollingRecs.find(r => r.rolling_period_years === 3)
+      const sip5y  = sipRecs.find(s => s.sip_period_years === 5)
+      const score  = compositeScore({
+        cagr5y: c5y, sharpe3y: risk3y?.sharpe_ratio ?? null,
+        sortino3y: risk3y?.sortino_ratio ?? null,
         rolling3yPct: roll3y?.positive_return_pct ?? null,
-        maxDd:        risk3y?.max_drawdown ?? null,
-        sip5yXirr:    sip5y?.avg_sip_xirr ?? null,
+        maxDd: risk3y?.max_drawdown ?? null, sip5yXirr: sip5y?.avg_sip_xirr ?? null,
       })
 
       allScores.set(code, {
