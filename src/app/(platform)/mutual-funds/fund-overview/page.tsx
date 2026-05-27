@@ -279,21 +279,27 @@ export default function FundOverviewPage() {
       setRiskMetrics(null);
       setFundScore(null);
 
-      // Fetch NAV history
-      const { data: navRows } = await supabase
-        .from("nav_history")
-        .select("nav_date, nav")
-        .eq("scheme_code", s.scheme_code)
-        .order("nav_date", { ascending: true });
-
-      if (navRows) {
-        const pts: NavPoint[] = navRows.map((r) => ({
-          date: r.nav_date,
-          nav: Number(r.nav),
-          label: formatDate(r.nav_date),
-        }));
-        setNavData(pts);
-        setFilteredNav(filterNavByYears(pts, 3));
+      // Fetch NAV history live from mfapi.in
+      try {
+        const mfRes = await fetch(`https://api.mfapi.in/mf/${s.scheme_code}`);
+        const mfJson = await mfRes.json();
+        if (mfJson.status === "SUCCESS" && mfJson.data?.length) {
+          const pts: NavPoint[] = mfJson.data
+            .map((r: { date: string; nav: string }) => {
+              const [d, m, y] = r.date.split("-");
+              return {
+                date: `${y}-${m}-${d}`,
+                nav: parseFloat(r.nav),
+                label: formatDate(`${y}-${m}-${d}`),
+              };
+            })
+            .filter((p: NavPoint) => p.nav > 0)
+            .sort((a: NavPoint, b: NavPoint) => a.date.localeCompare(b.date));
+          setNavData(pts);
+          setFilteredNav(filterNavByYears(pts, 3));
+        }
+      } catch {
+        // mfapi unavailable — charts will show empty state
       }
 
       // Fetch risk metrics (3Y period)
@@ -606,7 +612,7 @@ export default function FundOverviewPage() {
                   </ResponsiveContainer>
                 ) : (
                   <div className="h-64 flex items-center justify-center text-sm text-muted-foreground">
-                    No NAV data. Run: npm run mf:nav
+                    Loading NAV from mfapi.in... If this persists, the API may be temporarily unavailable.
                   </div>
                 )}
               </div>

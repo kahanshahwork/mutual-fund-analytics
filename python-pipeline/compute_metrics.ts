@@ -1623,18 +1623,27 @@ function cagr(start: number | null, end: number, years: number): number | null {
   return Math.abs(v) > 500 ? null : Math.round(v * 100) / 100
 }
 
+function bounded(v: number | null, max = 200): number | null {
+  if (v === null || !isFinite(v) || isNaN(v)) return null
+  return Math.abs(v) > max ? null : v
+}
+
 function volatility(data: NavRow[]): number | null {
   if (data.length < 30) return null
   const sorted = [...data].sort((a, b) => a.nav_date.localeCompare(b.nav_date))
   const rets: number[] = []
   for (let i = 1; i < sorted.length; i++) {
     const prev = Number(sorted[i-1].nav), curr = Number(sorted[i].nav)
-    if (prev > 0) rets.push((curr - prev) / prev)
+    if (prev > 0 && curr > 0) {
+      const r = (curr - prev) / prev
+      if (Math.abs(r) < 0.5) rets.push(r)  // skip extreme daily moves (data errors)
+    }
   }
   if (rets.length < 20) return null
   const mean = rets.reduce((s, r) => s + r, 0) / rets.length
   const variance = rets.reduce((s, r) => s + Math.pow(r - mean, 2), 0) / rets.length
-  return Math.round(Math.sqrt(variance) * Math.sqrt(252) * 100 * 100) / 100
+  const vol = Math.sqrt(variance) * Math.sqrt(252) * 100
+  return bounded(Math.round(vol * 100) / 100)
 }
 
 function maxDrawdown(data: NavRow[]): number | null {
@@ -1643,11 +1652,13 @@ function maxDrawdown(data: NavRow[]): number | null {
   let peak = Number(sorted[0].nav), mdd = 0
   for (const r of sorted) {
     const n = Number(r.nav)
-    if (n > peak) peak = n
-    const dd = (peak - n) / peak * 100
-    if (dd > mdd) mdd = dd
+    if (n > 0 && n > peak) peak = n
+    if (peak > 0) {
+      const dd = (peak - n) / peak * 100
+      if (dd > mdd) mdd = dd
+    }
   }
-  return Math.round(-mdd * 100) / 100
+  return bounded(Math.round(-mdd * 100) / 100)
 }
 
 function downsideDev(data: NavRow[]): number | null {
@@ -1655,13 +1666,17 @@ function downsideDev(data: NavRow[]): number | null {
   const rets: number[] = []
   for (let i = 1; i < sorted.length; i++) {
     const prev = Number(sorted[i-1].nav), curr = Number(sorted[i].nav)
-    if (prev > 0) rets.push((curr - prev) / prev)
+    if (prev > 0 && curr > 0) {
+      const r = (curr - prev) / prev
+      if (Math.abs(r) < 0.5) rets.push(r)
+    }
   }
   if (rets.length < 30) return null
   const mar = RF / 100 / 252
   const neg = rets.filter(r => r < mar).map(r => Math.pow(r - mar, 2))
   if (!neg.length) return 0
-  return Math.round(Math.sqrt(neg.reduce((s, v) => s + v, 0) / rets.length) * Math.sqrt(252) * 100 * 100) / 100
+  const dd = Math.sqrt(neg.reduce((s, v) => s + v, 0) / rets.length) * Math.sqrt(252) * 100
+  return bounded(Math.round(dd * 100) / 100)
 }
 
 function ulcerIndex(data: NavRow[]): number | null {
@@ -1671,10 +1686,11 @@ function ulcerIndex(data: NavRow[]): number | null {
   const dds: number[] = []
   for (const r of sorted) {
     const n = Number(r.nav)
-    if (n > peak) peak = n
-    dds.push(Math.pow((peak - n) / peak * 100, 2))
+    if (n > 0 && n > peak) peak = n
+    if (peak > 0) dds.push(Math.pow((peak - n) / peak * 100, 2))
   }
-  return Math.round(Math.sqrt(dds.reduce((s, v) => s + v, 0) / dds.length) * 100) / 100
+  const ui = Math.sqrt(dds.reduce((s, v) => s + v, 0) / dds.length)
+  return bounded(Math.round(ui * 100) / 100, 100)
 }
 
 function rollingReturns(data: NavRow[], years: number) {
