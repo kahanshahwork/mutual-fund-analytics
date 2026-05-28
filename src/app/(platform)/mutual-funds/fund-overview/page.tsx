@@ -351,7 +351,7 @@ export default function FundOverviewPage() {
   })();
 
   const maxDrawdown = riskMetrics?.max_drawdown
-    ? (riskMetrics.max_drawdown * 100).toFixed(2) + "%"
+    ? Math.abs(riskMetrics.max_drawdown).toFixed(2) + "%"
     : navData.length
     ? Math.min(...drawdownData.map((d) => d.nav)).toFixed(2) + "%"
     : "—";
@@ -627,7 +627,7 @@ export default function FundOverviewPage() {
                     value={
                       riskMetrics?.volatility !== null &&
                       riskMetrics?.volatility !== undefined
-                        ? (riskMetrics.volatility * 100).toFixed(2) + "%"
+                        ? riskMetrics.volatility.toFixed(2) + "%"
                         : "—"
                     }
                     sub="Annualised std deviation"
@@ -669,7 +669,7 @@ export default function FundOverviewPage() {
                     value={
                       riskMetrics?.downside_deviation !== null &&
                       riskMetrics?.downside_deviation !== undefined
-                        ? (riskMetrics.downside_deviation * 100).toFixed(2) + "%"
+                        ? riskMetrics.downside_deviation.toFixed(2) + "%"
                         : "—"
                     }
                     sub="Below-target volatility"
