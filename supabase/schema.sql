@@ -32,20 +32,9 @@ create index if not exists idx_schemes_is_active on public.schemes(is_active);
 
 -- ============================================================
 -- TABLE 2: nav_history
--- Core NAV data — one row per scheme per date
+-- REMOVED: NAV history is stored locally in pipeline/data/nav.db
+-- This keeps Supabase storage under 50MB (free tier)
 -- ============================================================
-create table if not exists public.nav_history (
-  id          bigserial primary key,
-  scheme_code integer not null references public.schemes(scheme_code) on delete cascade,
-  nav_date    date not null,
-  nav         numeric(18, 4) not null,
-  created_at  timestamptz default now(),
-  unique(scheme_code, nav_date)
-);
-
-create index if not exists idx_nav_scheme_code on public.nav_history(scheme_code);
-create index if not exists idx_nav_date on public.nav_history(nav_date desc);
-create index if not exists idx_nav_scheme_date on public.nav_history(scheme_code, nav_date desc);
 
 -- ============================================================
 -- TABLE 3: rolling_return_metrics
@@ -219,24 +208,6 @@ create index if not exists idx_sync_log_date on public.nav_sync_log(sync_date de
 
 -- Enable RLS on all tables
 alter table public.schemes enable row level security;
-alter table public.nav_history enable row level security;
-alter table public.rolling_return_metrics enable row level security;
-alter table public.risk_metrics enable row level security;
-alter table public.sip_metrics enable row level security;
-alter table public.fund_scores enable row level security;
-alter table public.preferred_funds enable row level security;
-alter table public.client_profiles enable row level security;
-alter table public.client_portfolios enable row level security;
-alter table public.nav_sync_log enable row level security;
-
--- Public read access for market data tables (any logged-in advisor can read)
-create policy "Authenticated users can read schemes"
-  on public.schemes for select
-  to authenticated using (true);
-
-create policy "Authenticated users can read nav_history"
-  on public.nav_history for select
-  to authenticated using (true);
 
 create policy "Authenticated users can read rolling_return_metrics"
   on public.rolling_return_metrics for select

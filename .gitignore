@@ -41,3 +41,7 @@ __pycache__/
 .venv/
 venv/
 python-pipeline/__pycache__/
+
+pipeline/data/nav.db
+pipeline/data/*.db
+pipeline/logs/*.log

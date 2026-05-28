@@ -7,10 +7,11 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "mf:schemes": "npx tsx python-pipeline/sync_schemes.ts",
-    "mf:nav": "npx tsx python-pipeline/sync_nav.ts",
-    "mf:nav:today": "npx tsx python-pipeline/sync_nav.ts --today",
-    "mf:compute": "npx tsx python-pipeline/compute_metrics.ts"
+    "mf:schemes":  "npx tsx pipeline/sync_schemes.ts",
+    "mf:nav":      "npx tsx pipeline/sync_nav.ts --today",
+    "mf:nav:full": "npx tsx pipeline/sync_nav.ts --full",
+    "mf:compute":  "npx tsx pipeline/compute_metrics.ts",
+    "mf:daily":    "npx tsx pipeline/sync_nav.ts --today && npx tsx pipeline/compute_metrics.ts"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.2",
@@ -24,6 +25,7 @@
     "@supabase/ssr": "^0.5.1",
     "@supabase/supabase-js": "^2.45.4",
     "autoprefixer": "^10.5.0",
+    "better-sqlite3": "^9.6.0",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.1",
     "date-fns": "^3.6.0",
@@ -37,6 +39,7 @@
     "tailwindcss-animate": "^1.0.7"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^20",
     "@types/react": "^18",
     "@types/react-dom": "^18",

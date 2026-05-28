@@ -17,13 +17,7 @@ export interface Scheme {
   updated_at: string;
 }
 
-export interface NavHistory {
-  id: number;
-  scheme_code: number;
-  nav_date: string;
-  nav: number;
-  created_at: string;
-}
+// NavHistory removed — NAV data stored locally in pipeline/data/nav.db
 
 export interface RollingReturnMetrics {
   id: number;
