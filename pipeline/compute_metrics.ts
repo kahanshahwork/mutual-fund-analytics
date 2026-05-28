@@ -1,19 +1,12 @@
 #!/usr/bin/env npx tsx
 /**
- * ENGINE 3: COMPUTE METRICS (Live NAV version)
- * ─────────────────────────────────────────────────────────────────
- * Run: npm run mf:compute
+ * pipeline/compute_metrics.ts
+ * Reads nav.db → computes all metrics → overwrites Supabase precomputed tables
  *
- * Fetches NAV history LIVE from mfapi.in for each scheme.
- * Does NOT store nav_history in DB — computes everything in memory
- * and writes only precomputed analytics to Supabase.
- *
- * Tables written:
- *   rolling_return_metrics, risk_metrics, sip_metrics, fund_scores
- *
- * DB storage: ~50MB total (vs 600MB with nav_history)
+ * Standards: RF=7%, √252, simple returns, skip |daily return| > 10%
  */
 
+import { openDb, getNav, getAllCodes } from './db'
 import { createClient } from '@supabase/supabase-js'
 import * as dotenv from 'dotenv'
 import * as path from 'path'
@@ -25,1592 +18,34 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 )
 
-const MFAPI  = 'https://api.mfapi.in/mf'
-const RF     = 6.5
-const CHUNK  = 200
-const DELAY  = 80   // ms between mfapi requests
+const RF    = 7.0
+const CHUNK = 200
 
-// ── Curated scheme list ────────────────────────────────────────────────────────
+type NavRow = { scheme_code: number; nav_date: string; nav: number }
 
-const SCHEME_CODES = [
-  100033,
-  100042,
-  100043,
-  100047,
-  100061,
-  100064,
-  100081,
-  100084,
-  100119,
-  100151,
-  100175,
-  100177,
-  100190,
-  100194,
-  100196,
-  100199,
-  100219,
-  100221,
-  100223,
-  100234,
-  100247,
-  100254,
-  100313,
-  100315,
-  100317,
-  100319,
-  100323,
-  100349,
-  100350,
-  100354,
-  100363,
-  100369,
-  100371,
-  100377,
-  100380,
-  100382,
-  100414,
-  100471,
-  100473,
-  100475,
-  100476,
-  100477,
-  100480,
-  100484,
-  100496,
-  100501,
-  100520,
-  100522,
-  100526,
-  100538,
-  100544,
-  100546,
-  100550,
-  100597,
-  100601,
-  100603,
-  100608,
-  100631,
-  100639,
-  100641,
-  100651,
-  100664,
-  100669,
-  100684,
-  100740,
-  100741,
-  100751,
-  100781,
-  100784,
-  100789,
-  100792,
-  100795,
-  100796,
-  100805,
-  100807,
-  100821,
-  100822,
-  100835,
-  100837,
-  100845,
-  100851,
-  100856,
-  100865,
-  100868,
-  100872,
-  100873,
-  100902,
-  100948,
-  100963,
-  100968,
-  101000,
-  101001,
-  101002,
-  101048,
-  101065,
-  101070,
-  101072,
-  101082,
-  101083,
-  101092,
-  101095,
-  101120,
-  101122,
-  101161,
-  101170,
-  101185,
-  101187,
-  101190,
-  101199,
-  101201,
-  101206,
-  101209,
-  101221,
-  101228,
-  101231,
-  101279,
-  101281,
-  101304,
-  101314,
-  101333,
-  101357,
-  101362,
-  101365,
-  101394,
-  101402,
-  101405,
-  101408,
-  101421,
-  101430,
-  101498,
-  101520,
-  101521,
-  101525,
-  101539,
-  101585,
-  101592,
-  101594,
-  101599,
-  101630,
-  101635,
-  101656,
-  101672,
-  101685,
-  101750,
-  101758,
-  101762,
-  101764,
-  101766,
-  101806,
-  101818,
-  101824,
-  101830,
-  101837,
-  101844,
-  101847,
-  101853,
-  101862,
-  101869,
-  101876,
-  101878,
-  101893,
-  101906,
-  101909,
-  101910,
-  101922,
-  101929,
-  101932,
-  101933,
-  101934,
-  101979,
-  101991,
-  101993,
-  101996,
-  102000,
-  102004,
-  102020,
-  102053,
-  102060,
-  102061,
-  102066,
-  102142,
-  102153,
-  102155,
-  102171,
-  102205,
-  102248,
-  102252,
-  102262,
-  102268,
-  102328,
-  102330,
-  102381,
-  102394,
-  102395,
-  102401,
-  102404,
-  102414,
-  102431,
-  102441,
-  102448,
-  102456,
-  102458,
-  102460,
-  102462,
-  102479,
-  102481,
-  102494,
-  102505,
-  102510,
-  102512,
-  102528,
-  102532,
-  102535,
-  102540,
-  102544,
-  102594,
-  102661,
-  102672,
-  102673,
-  102719,
-  102722,
-  102725,
-  102729,
-  102751,
-  102756,
-  102760,
-  102767,
-  102827,
-  102829,
-  102832,
-  102835,
-  102839,
-  102846,
-  102849,
-  102875,
-  102883,
-  102920,
-  102931,
-  102941,
-  102969,
-  103024,
-  103034,
-  103040,
-  103048,
-  103071,
-  103083,
-  103085,
-  103087,
-  103098,
-  103111,
-  103149,
-  103166,
-  103174,
-  103176,
-  103178,
-  103188,
-  103192,
-  103195,
-  103196,
-  103215,
-  103224,
-  103225,
-  103234,
-  103283,
-  103297,
-  103309,
-  103332,
-  103335,
-  103336,
-  103339,
-  103340,
-  103360,
-  103390,
-  103408,
-  103445,
-  103457,
-  103464,
-  103476,
-  103504,
-  103534,
-  103591,
-  103633,
-  103649,
-  103731,
-  103733,
-  103747,
-  103780,
-  103792,
-  103819,
-  104075,
-  104241,
-  104271,
-  104344,
-  104350,
-  104406,
-  104425,
-  104479,
-  104481,
-  104486,
-  104488,
-  104491,
-  104513,
-  104601,
-  104603,
-  104636,
-  104637,
-  104640,
-  104683,
-  104684,
-  104685,
-  104726,
-  104728,
-  104772,
-  104908,
-  105001,
-  105156,
-  105185,
-  105189,
-  105274,
-  105280,
-  105317,
-  105417,
-  105460,
-  105503,
-  105544,
-  105562,
-  105563,
-  105564,
-  105602,
-  105603,
-  105628,
-  105758,
-  105804,
-  105817,
-  105823,
-  105872,
-  105875,
-  105968,
-  105989,
-  106096,
-  106098,
-  106128,
-  106129,
-  106144,
-  106147,
-  106170,
-  106177,
-  106212,
-  106217,
-  106227,
-  106237,
-  106253,
-  106317,
-  106329,
-  106330,
-  106384,
-  106482,
-  106501,
-  106508,
-  106511,
-  106514,
-  106561,
-  106624,
-  106654,
-  106670,
-  106722,
-  106793,
-  106796,
-  106821,
-  106823,
-  106871,
-  107288,
-  107301,
-  107328,
-  107338,
-  107353,
-  107394,
-  107410,
-  107475,
-  107477,
-  107481,
-  107484,
-  107524,
-  107578,
-  107623,
-  107625,
-  107636,
-  107648,
-  107659,
-  107672,
-  107705,
-  107715,
-  107718,
-  107745,
-  107763,
-  107785,
-  107820,
-  108097,
-  108167,
-  108202,
-  108209,
-  108222,
-  108273,
-  108321,
-  108378,
-  108466,
-  108467,
-  108511,
-  108592,
-  108594,
-  108596,
-  108632,
-  108690,
-  108728,
-  108753,
-  108756,
-  108765,
-  108768,
-  108786,
-  108793,
-  108799,
-  108845,
-  108846,
-  108865,
-  108899,
-  108900,
-  108909,
-  108960,
-  108961,
-  108962,
-  108994,
-  108995,
-  109254,
-  109256,
-  109258,
-  109265,
-  109269,
-  109275,
-  109302,
-  109353,
-  109371,
-  109445,
-  109493,
-  109522,
-  109556,
-  109830,
-  109940,
-  109945,
-  109946,
-  110150,
-  110252,
-  110256,
-  110599,
-  110603,
-  110704,
-  110706,
-  110751,
-  110915,
-  110920,
-  110921,
-  111339,
-  111381,
-  111524,
-  111525,
-  111569,
-  111599,
-  111638,
-  111646,
-  111682,
-  111684,
-  111692,
-  111698,
-  111704,
-  111709,
-  111710,
-  111712,
-  111715,
-  111722,
-  111748,
-  111753,
-  111760,
-  111848,
-  111879,
-  111883,
-  111915,
-  111928,
-  111935,
-  111937,
-  111940,
-  111941,
-  111943,
-  111946,
-  111955,
-  111957,
-  111959,
-  111961,
-  111962,
-  111972,
-  111981,
-  111987,
-  111993,
-  111996,
-  111999,
-  112002,
-  112012,
-  112040,
-  112041,
-  112054,
-  112064,
-  112079,
-  112083,
-  112086,
-  112088,
-  112090,
-  112098,
-  112105,
-  112108,
-  112116,
-  112117,
-  112120,
-  112123,
-  112128,
-  112152,
-  112210,
-  112277,
-  112288,
-  112323,
-  112342,
-  112353,
-  112354,
-  112359,
-  112408,
-  112423,
-  112429,
-  112457,
-  112487,
-  112496,
-  112538,
-  112600,
-  112632,
-  112636,
-  112640,
-  112644,
-  112654,
-  112656,
-  112713,
-  112721,
-  112868,
-  112874,
-  112877,
-  112887,
-  112890,
-  112901,
-  112924,
-  112932,
-  112936,
-  112938,
-  112939,
-  112943,
-  112948,
-  112957,
-  113036,
-  113059,
-  113063,
-  113064,
-  113070,
-  113077,
-  113096,
-  113099,
-  113135,
-  113142,
-  113172,
-  113177,
-  113183,
-  113221,
-  113242,
-  113244,
-  113249,
-  113345,
-  113460,
-  113463,
-  113476,
-  113479,
-  113544,
-  113547,
-  113553,
-  113560,
-  113566,
-  113634,
-  113639,
-  113640,
-  114099,
-  114101,
-  114216,
-  114239,
-  114301,
-  114309,
-  114359,
-  114382,
-  114458,
-  114476,
-  114514,
-  114515,
-  114564,
-  114982,
-  115068,
-  115077,
-  115092,
-  115270,
-  115398,
-  115752,
-  115812,
-  115887,
-  115934,
-  115991,
-  116051,
-  116077,
-  116153,
-  116203,
-  116376,
-  116424,
-  116471,
-  116485,
-  116547,
-  116555,
-  116583,
-  116633,
-  116685,
-  117281,
-  117311,
-  117312,
-  117446,
-  117549,
-  117560,
-  117631,
-  117716,
-  117941,
-  117945,
-  117951,
-  117953,
-  117981,
-  118030,
-  118043,
-  118049,
-  118058,
-  118069,
-  118071,
-  118074,
-  118078,
-  118102,
-  118133,
-  118194,
-  118232,
-  118902,
-  118907,
-  121270,
-  121280,
-  121622,
-  122387,
-  122612,
-  122640,
-  122644,
-  122650,
-  123120,
-  123690,
-  123708,
-  123902,
-  124172,
-  124233,
-  125259,
-  125305,
-  125350,
-  125494,
-  125498,
-  125595,
-  125713,
-  126351,
-  126394,
-  126638,
-  126687,
-  126939,
-  127039,
-  127183,
-  127849,
-  127921,
-  128235,
-  128628,
-  129006,
-  129048,
-  129187,
-  129647,
-  129695,
-  129889,
-  129988,
-  130037,
-  130205,
-  130309,
-  130348,
-  130459,
-  130472,
-  130496,
-  130502,
-  130721,
-  130771,
-  131022,
-  131051,
-  131163,
-  131357,
-  131372,
-  131527,
-  131578,
-  131666,
-  132005,
-  132757,
-  132987,
-  132998,
-  133036,
-  133102,
-  133146,
-  133184,
-  133318,
-  133353,
-  133385,
-  133486,
-  133527,
-  133557,
-  133588,
-  133711,
-  133772,
-  133782,
-  133802,
-  133805,
-  133836,
-  133858,
-  133896,
-  133926,
-  134002,
-  134016,
-  134044,
-  134109,
-  134133,
-  134152,
-  134336,
-  134356,
-  134383,
-  134415,
-  134499,
-  134545,
-  134593,
-  134644,
-  134815,
-  135122,
-  135343,
-  135349,
-  135598,
-  135655,
-  135678,
-  135784,
-  135794,
-  135812,
-  135815,
-  135914,
-  136086,
-  136563,
-  138256,
-  138288,
-  138308,
-  138310,
-  138318,
-  138337,
-  138343,
-  138372,
-  138453,
-  138470,
-  138481,
-  138482,
-  138523,
-  138566,
-  138876,
-  138905,
-  138952,
-  138987,
-  138990,
-  139019,
-  139224,
-  139537,
-  139560,
-  139561,
-  139562,
-  139563,
-  139783,
-  139870,
-  139889,
-  139891,
-  140172,
-  140176,
-  140182,
-  140201,
-  140207,
-  140225,
-  140229,
-  140230,
-  140244,
-  140283,
-  140336,
-  140351,
-  140355,
-  140359,
-  140381,
-  140385,
-  140447,
-  140460,
-  140578,
-  140609,
-  140620,
-  140659,
-  140749,
-  140771,
-  141061,
-  141066,
-  141068,
-  141070,
-  141224,
-  141247,
-  141339,
-  141462,
-  141593,
-  141644,
-  141862,
-  141913,
-  141927,
-  141929,
-  142035,
-  142109,
-  142282,
-  142642,
-  143162,
-  143239,
-  143260,
-  143340,
-  143351,
-  143464,
-  143493,
-  143536,
-  143598,
-  143607,
-  143620,
-  143702,
-  143785,
-  143787,
-  143830,
-  143837,
-  144171,
-  144197,
-  144212,
-  144310,
-  144333,
-  144345,
-  144393,
-  144401,
-  144453,
-  144461,
-  144484,
-  144548,
-  144636,
-  144644,
-  144759,
-  144784,
-  144902,
-  145040,
-  145042,
-  145112,
-  145139,
-  145208,
-  145287,
-  145355,
-  145378,
-  145387,
-  145456,
-  145471,
-  145475,
-  145481,
-  145535,
-  145551,
-  145590,
-  145605,
-  145677,
-  145695,
-  145723,
-  145811,
-  145820,
-  145890,
-  145946,
-  145952,
-  145968,
-  146007,
-  146061,
-  146070,
-  146127,
-  146142,
-  146187,
-  146193,
-  146207,
-  146294,
-  146379,
-  146380,
-  146456,
-  146514,
-  146518,
-  146551,
-  146678,
-  146771,
-  146950,
-  146959,
-  146977,
-  146997,
-  147124,
-  147129,
-  147153,
-  147184,
-  147193,
-  147203,
-  147213,
-  147223,
-  147266,
-  147290,
-  147307,
-  147345,
-  147382,
-  147392,
-  147405,
-  147407,
-  147425,
-  147447,
-  147454,
-  147477,
-  147479,
-  147482,
-  147490,
-  147494,
-  147519,
-  147534,
-  147544,
-  147565,
-  147568,
-  147569,
-  147590,
-  147600,
-  147618,
-  147635,
-  147650,
-  147665,
-  147674,
-  147700,
-  147701,
-  147714,
-  147734,
-  147739,
-  147748,
-  147760,
-  147770,
-  147779,
-  147787,
-  147795,
-  147797,
-  147798,
-  147804,
-  147807,
-  147836,
-  147843,
-  147878,
-  147907,
-  147920,
-  147922,
-  147936,
-  147944,
-  147954,
-  147961,
-  147994,
-  148000,
-  148024,
-  148050,
-  148064,
-  148071,
-  148094,
-  148100,
-  148117,
-  148146,
-  148159,
-  148217,
-  148237,
-  148258,
-  148259,
-  148271,
-  148280,
-  148286,
-  148303,
-  148330,
-  148351,
-  148361,
-  148365,
-  148400,
-  148405,
-  148409,
-  148416,
-  148425,
-  148459,
-  148467,
-  148471,
-  148477,
-  148483,
-  148486,
-  148491,
-  148496,
-  148504,
-  148511,
-  148512,
-  148518,
-  148530,
-  148535,
-  148571,
-  148576,
-  148591,
-  148594,
-  148613,
-  148617,
-  148621,
-  148625,
-  148655,
-  148657,
-  148692,
-  148695,
-  148696,
-  148698,
-  148701,
-  148705,
-  148723,
-  148727,
-  148732,
-  148735,
-  148743,
-  148757,
-  148768,
-  148805,
-  148811,
-  148833,
-  148884,
-  148896,
-  148906,
-  148929,
-  148943,
-  148953,
-  148959,
-  148973,
-  148974,
-  148982,
-  148987,
-  148989,
-  149003,
-  149012,
-  149020,
-  149021,
-  149040,
-  149048,
-  149056,
-  149073,
-  149088,
-  149089,
-  149090,
-  149101,
-  149106,
-  149115,
-  149116,
-  149132,
-  149153,
-  149157,
-  149167,
-  149171,
-  149182,
-  149218,
-  149241,
-  149252,
-  149259,
-  149266,
-  149270,
-  149281,
-  149287,
-  149299,
-  149305,
-  149324,
-  149337,
-  149350,
-  149351,
-  149366,
-  149371,
-  149380,
-  149382,
-  149390,
-  149404,
-  149439,
-  149448,
-  149449,
-  149456,
-  149467,
-  149519,
-  149532,
-  149535,
-  149552,
-  149569,
-  149585,
-  149599,
-  149661,
-  149667,
-  149674,
-  149715,
-  149766,
-  149795,
-  149802,
-  149805,
-  149810,
-  149817,
-  149833,
-  149837,
-  149859,
-  149869,
-  149886,
-  149893,
-  149896,
-  149898,
-  149911,
-  149960,
-  150156,
-  150160,
-  150165,
-  150172,
-  150173,
-  150185,
-  150203,
-  150209,
-  150229,
-  150235,
-  150240,
-  150250,
-  150258,
-  150263,
-  150268,
-  150284,
-  150291,
-  150301,
-  150312,
-  150345,
-  150347,
-  150366,
-  150368,
-  150382,
-  150385,
-  150389,
-  150393,
-  150402,
-  150405,
-  150409,
-  150427,
-  150441,
-  150466,
-  150473,
-  150477,
-  150480,
-  150482,
-  150490,
-  150503,
-  150511,
-  150542,
-  150565,
-  150568,
-  150583,
-  150589,
-  150592,
-  150596,
-  150617,
-  150632,
-  150633,
-  150637,
-  150645,
-  150657,
-  150658,
-  150661,
-  150672,
-  150676,
-  150715,
-  150736,
-  150741,
-  150750,
-  150799,
-  150812,
-  150816,
-  150839,
-  150855,
-  150894,
-  150897,
-  150900,
-  150912,
-  150929,
-  150992,
-  151013,
-  151034,
-  151037,
-  151043,
-  151048,
-  151058,
-  151065,
-  151076,
-  151084,
-  151104,
-  151110,
-  151114,
-  151120,
-  151127,
-  151133,
-  151134,
-  151149,
-  151158,
-  151162,
-  151164,
-  151178,
-  151195,
-  151212,
-  151230,
-  151235,
-  151268,
-  151289,
-  151309,
-  151322,
-  151374,
-  151375,
-  151377,
-  151381,
-  151414,
-  151445,
-  151457,
-  151472,
-  151527,
-  151602,
-  151609,
-  151647,
-  151714,
-  151725,
-  151726,
-  151729,
-  151732,
-  151734,
-  151746,
-  151747,
-  151761,
-  151765,
-  151778,
-  151787,
-  151795,
-  151799,
-  151803,
-  151812,
-  151818,
-  151821,
-  151837,
-  151851,
-  151855,
-  151868,
-  151882,
-  151893,
-  151898,
-  151913,
-  151920,
-  151935,
-  151950,
-  151973,
-  152001,
-  152003,
-  152009,
-  152016,
-  152025,
-  152027,
-  152043,
-  152052,
-  152053,
-  152058,
-  152061,
-  152065,
-  152072,
-  152078,
-  152084,
-  152091,
-  152095,
-  152108,
-  152110,
-  152122,
-  152130,
-  152136,
-  152142,
-  152147,
-  152153,
-  152165,
-  152170,
-  152179,
-  152182,
-  152187,
-  152196,
-  152205,
-  152208,
-  152216,
-  152225,
-  152232,
-  152245,
-  152266,
-  152274,
-  152290,
-  152297,
-  152307,
-  152311,
-  152322,
-  152326,
-  152331,
-  152338,
-  152347,
-  152361,
-  152366,
-  152372,
-  152378,
-  152383,
-  152387,
-  152391,
-  152398,
-  152406,
-  152413,
-  152421,
-  152433,
-  152439,
-  152441,
-  152447,
-  152457,
-  152460,
-  152464,
-  152475,
-  152489,
-  152512,
-  152518,
-  152560,
-  152573,
-  152582,
-  152602,
-  152612,
-  152617,
-  152632,
-  152642,
-  152647,
-  152650,
-  152653,
-  152671,
-  152682,
-  152690,
-  152696,
-  152711,
-  152720,
-  152730,
-  152733,
-  152738,
-  152758,
-  152763,
-  152780,
-  152786,
-  152792,
-  152800,
-  152804,
-  152816,
-  152824,
-  152828,
-  152834,
-  152843,
-  152848,
-  152850,
-  152853,
-  152856,
-  152862,
-  152892,
-  152904,
-  152906,
-  152913,
-  152918,
-  152922,
-  152927,
-  152930,
-  152940,
-  152943,
-  152974,
-  153001,
-  153009,
-  153036,
-  153040,
-  153042,
-  153046,
-  153061,
-  153066,
-  153072,
-  153087,
-  153088,
-  153091,
-  153093,
-  153100,
-  153104,
-  153107,
-  153140,
-  153155,
-  153162,
-  153188,
-  153194,
-  153198,
-  153202,
-  153211,
-  153212,
-  153221,
-  153238,
-  153240,
-  153248,
-  153253,
-  153255,
-  153263,
-  153267,
-  153273,
-  153284,
-  153293,
-  153304,
-  153307,
-  153323,
-  153327,
-  153338,
-  153349,
-  153356,
-  153371,
-  153377,
-  153382,
-  153387,
-  153399,
-  153419,
-  153428,
-  153441,
-  153466,
-  153480,
-  153482,
-  153486,
-  153503,
-  153508,
-  153516,
-  153530,
-  153533,
-  153542,
-  153544,
-  153554,
-  153571,
-  153580,
-  153588,
-  153601,
-  153609,
-  153627,
-  153645,
-  153652,
-  153663,
-  153675,
-  153691,
-  153695,
-  153700,
-  153707,
-  153710,
-  153713,
-  153716,
-  153726,
-  153733,
-  153739,
-  153769,
-  153772,
-  153779,
-  153784,
-  153794,
-  153798,
-  153805,
-  153851,
-  153855,
-  153870,
-  153888,
-  153892,
-  153902,
-  153909,
-  153916,
-  153935,
-  153950,
-  153953,
-  153974,
-  153977,
-  153985,
-  153988,
-  153992,
-  154002,
-  154010,
-  154012,
-  154016,
-  154022,
-  154041,
-  154047,
-  154070,
-  154075,
-  154090,
-  154095,
-  154102,
-  154107,
-  154113,
-  154137,
-  154143,
-  154154,
-  154165,
-  154183,
-  154203,
-  154209,
-  154211,
-  154214,
-  154226,
-  154231,
-  154233,
-  154247,
-  154258,
-  154268,
-  154298,
-  154302,
-  154303,
-  154325,
-  154327,
-  154342,
-  154344,
-]
+// ── Daily returns — cleaned ────────────────────────────────────────────────────
 
-const ALL_CODES = [...new Set(SCHEME_CODES)]
-
-// ── Types ──────────────────────────────────────────────────────────────────────
-
-type NavRow = { nav_date: string; nav: number }
-
-// ── mfapi fetch ────────────────────────────────────────────────────────────────
-
-function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)) }
-
-function parseDate(s: string): string {
-  const [d, m, y] = s.split('-')
-  return `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`
-}
-
-async function fetchNav(code: number): Promise<NavRow[] | null> {
-  try {
-    const res = await fetch(`${MFAPI}/${code}`)
-    if (!res.ok) return null
-    const json = await res.json()
-    if (json.status !== 'SUCCESS' || !json.data?.length) return null
-    const rows: NavRow[] = json.data
-      .map((r: any) => ({ nav_date: parseDate(r.date), nav: parseFloat(r.nav) }))
-      .filter((r: NavRow) => r.nav > 0)
-      .sort((a: NavRow, b: NavRow) => a.nav_date.localeCompare(b.nav_date))
-    return rows.length ? rows : null
-  } catch {
-    return null
+function dailyReturns(data: NavRow[]): number[] {
+  const rets: number[] = []
+  for (let i = 1; i < data.length; i++) {
+    const prev = data[i-1].nav, curr = data[i].nav
+    if (prev <= 0 || curr <= 0) continue
+    const r = (curr - prev) / prev
+    if (Math.abs(r) <= 0.10) rets.push(r)   // skip data errors
   }
+  return rets
 }
 
-// ── Math helpers ───────────────────────────────────────────────────────────────
+// ── Math ───────────────────────────────────────────────────────────────────────
 
 function navAt(data: NavRow[], target: Date, tolDays = 20): number | null {
   const t = target.getTime()
-  let best: NavRow | null = null
-  let minDiff = Infinity
+  let best: NavRow | null = null, minDiff = Infinity
   for (const r of data) {
     const diff = Math.abs(new Date(r.nav_date).getTime() - t)
     if (diff < minDiff) { minDiff = diff; best = r }
   }
-  return minDiff <= tolDays * 86_400_000 && best ? Number(best.nav) : null
+  return minDiff <= tolDays * 86_400_000 && best ? best.nav : null
 }
 
 function ago(years: number, from: Date): Date {
@@ -1618,117 +53,89 @@ function ago(years: number, from: Date): Date {
 }
 
 function cagr(start: number | null, end: number, years: number): number | null {
-  if (!start || !end || start <= 0 || end <= 0 || years < 0.25) return null
+  if (!start || start <= 0 || end <= 0 || years < 0.25) return null
   const v = (Math.pow(end / start, 1 / years) - 1) * 100
-  return Math.abs(v) > 500 ? null : Math.round(v * 100) / 100
+  return isFinite(v) && Math.abs(v) < 200 ? Math.round(v * 100) / 100 : null
 }
 
-function bounded(v: number | null, max = 200): number | null {
-  if (v === null || !isFinite(v) || isNaN(v)) return null
-  return Math.abs(v) > max ? null : v
-}
-
-function volatility(data: NavRow[]): number | null {
-  if (data.length < 30) return null
-  const sorted = [...data].sort((a, b) => a.nav_date.localeCompare(b.nav_date))
-  const rets: number[] = []
-  for (let i = 1; i < sorted.length; i++) {
-    const prev = Number(sorted[i-1].nav), curr = Number(sorted[i].nav)
-    if (prev > 0 && curr > 0) {
-      const r = (curr - prev) / prev
-      if (Math.abs(r) < 0.5) rets.push(r)  // skip extreme daily moves (data errors)
-    }
-  }
+function volatility(rets: number[]): number | null {
   if (rets.length < 20) return null
-  const mean = rets.reduce((s, r) => s + r, 0) / rets.length
-  const variance = rets.reduce((s, r) => s + Math.pow(r - mean, 2), 0) / rets.length
-  const vol = Math.sqrt(variance) * Math.sqrt(252) * 100
-  return bounded(Math.round(vol * 100) / 100)
+  const mean = rets.reduce((s,r) => s+r, 0) / rets.length
+  const vari = rets.reduce((s,r) => s + Math.pow(r-mean, 2), 0) / rets.length
+  const vol  = Math.sqrt(vari) * Math.sqrt(252) * 100
+  return isFinite(vol) ? Math.round(vol * 100) / 100 : null
+}
+
+function downsideDev(rets: number[]): number | null {
+  if (rets.length < 20) return null
+  const mar      = RF / 100 / 252
+  const downside = rets.filter(r => r < mar)
+  if (!downside.length) return 0
+  const vari = downside.reduce((s,r) => s + Math.pow(r - mar, 2), 0) / rets.length
+  const dd   = Math.sqrt(vari) * Math.sqrt(252) * 100
+  return isFinite(dd) ? Math.round(dd * 100) / 100 : null
 }
 
 function maxDrawdown(data: NavRow[]): number | null {
-  if (data.length < 2) return null
-  const sorted = [...data].sort((a, b) => a.nav_date.localeCompare(b.nav_date))
-  let peak = Number(sorted[0].nav), mdd = 0
-  for (const r of sorted) {
-    const n = Number(r.nav)
-    if (n > 0 && n > peak) peak = n
-    if (peak > 0) {
-      const dd = (peak - n) / peak * 100
-      if (dd > mdd) mdd = dd
-    }
+  let peak = data[0].nav, mdd = 0
+  for (const r of data) {
+    if (r.nav > peak) peak = r.nav
+    if (peak > 0) { const dd = (peak - r.nav) / peak * 100; if (dd > mdd) mdd = dd }
   }
-  return bounded(Math.round(-mdd * 100) / 100)
-}
-
-function downsideDev(data: NavRow[]): number | null {
-  const sorted = [...data].sort((a, b) => a.nav_date.localeCompare(b.nav_date))
-  const rets: number[] = []
-  for (let i = 1; i < sorted.length; i++) {
-    const prev = Number(sorted[i-1].nav), curr = Number(sorted[i].nav)
-    if (prev > 0 && curr > 0) {
-      const r = (curr - prev) / prev
-      if (Math.abs(r) < 0.5) rets.push(r)
-    }
-  }
-  if (rets.length < 30) return null
-  const mar = RF / 100 / 252
-  const neg = rets.filter(r => r < mar).map(r => Math.pow(r - mar, 2))
-  if (!neg.length) return 0
-  const dd = Math.sqrt(neg.reduce((s, v) => s + v, 0) / rets.length) * Math.sqrt(252) * 100
-  return bounded(Math.round(dd * 100) / 100)
+  const result = -Math.round(mdd * 100) / 100
+  return isFinite(result) ? result : null
 }
 
 function ulcerIndex(data: NavRow[]): number | null {
-  const sorted = [...data].sort((a, b) => a.nav_date.localeCompare(b.nav_date))
-  if (sorted.length < 10) return null
-  let peak = Number(sorted[0].nav)
+  if (data.length < 10) return null
+  let peak = data[0].nav
   const dds: number[] = []
-  for (const r of sorted) {
-    const n = Number(r.nav)
-    if (n > 0 && n > peak) peak = n
-    if (peak > 0) dds.push(Math.pow((peak - n) / peak * 100, 2))
+  for (const r of data) {
+    if (r.nav > peak) peak = r.nav
+    if (peak > 0) dds.push(Math.pow((peak - r.nav) / peak * 100, 2))
   }
-  const ui = Math.sqrt(dds.reduce((s, v) => s + v, 0) / dds.length)
-  return bounded(Math.round(ui * 100) / 100, 100)
+  const ui = Math.sqrt(dds.reduce((s,v) => s+v, 0) / dds.length)
+  return isFinite(ui) ? Math.round(ui * 100) / 100 : null
 }
 
 function rollingReturns(data: NavRow[], years: number) {
   if (data.length < 30) return null
-  const sorted = [...data].sort((a, b) => a.nav_date.localeCompare(b.nav_date))
-  const ms = years * 365.25 * 86_400_000
+  const ms   = years * 365.25 * 86_400_000
+  const step = Math.max(1, Math.floor(data.length / 200))
   const results: number[] = []
-  const step = Math.max(1, Math.floor(sorted.length / 200))
-  for (let i = 0; i < sorted.length; i += step) {
-    const endTarget = new Date(new Date(sorted[i].nav_date).getTime() + ms)
-    const endNav = navAt(sorted, endTarget, 20)
+  for (let i = 0; i < data.length; i += step) {
+    const startNav  = data[i].nav
+    if (startNav <= 0) continue
+    const endTarget = new Date(new Date(data[i].nav_date).getTime() + ms)
+    const endNav    = navAt(data, endTarget, 20)
     if (!endNav) continue
-    const r = cagr(Number(sorted[i].nav), endNav, years)
+    const actualYrs = (endTarget.getTime() - new Date(data[i].nav_date).getTime()) / (365.25 * 86_400_000)
+    if (actualYrs < years * 0.85) continue
+    const r = cagr(startNav, endNav, actualYrs)
     if (r !== null) results.push(r)
   }
   if (results.length < 5) return null
-  const s = [...results].sort((a, b) => a - b)
-  const avg = results.reduce((a, v) => a + v, 0) / results.length
+  const s   = [...results].sort((a,b) => a-b)
+  const avg = results.reduce((a,v) => a+v, 0) / results.length
   return {
-    avg:         Math.round(avg * 100) / 100,
-    median:      Math.round(s[Math.floor(s.length / 2)] * 100) / 100,
-    min:         Math.round(s[0] * 100) / 100,
-    max:         Math.round(s[s.length - 1] * 100) / 100,
+    avg:        Math.round(avg * 100) / 100,
+    median:     Math.round(s[Math.floor(s.length/2)] * 100) / 100,
+    min:        Math.round(s[0] * 100) / 100,
+    max:        Math.round(s[s.length-1] * 100) / 100,
     positivePct: Math.round(results.filter(r => r > 0).length / results.length * 100 * 100) / 100,
-    dataPoints:  results.length,
+    dataPoints: results.length,
   }
 }
 
 function sipXirr(data: NavRow[], years: number): number | null {
-  const sorted = [...data].sort((a, b) => a.nav_date.localeCompare(b.nav_date))
-  if (sorted.length < 30) return null
-  const latestDate = new Date(sorted[sorted.length - 1].nav_date)
-  const latestNav  = Number(sorted[sorted.length - 1].nav)
+  if (data.length < 30) return null
+  const latestDate = new Date(data[data.length-1].nav_date)
+  const latestNav  = data[data.length-1].nav
   const startDate  = ago(years, latestDate)
   let units = 0, months = 0
   const cursor = new Date(startDate)
   while (cursor <= latestDate) {
-    const n = navAt(sorted, cursor, 15)
+    const n = navAt(data, cursor, 15)
     if (n && n > 0) { units += 10_000 / n; months++ }
     cursor.setMonth(cursor.getMonth() + 1)
   }
@@ -1737,88 +144,82 @@ function sipXirr(data: NavRow[], years: number): number | null {
 }
 
 function compositeScore(p: {
-  cagr5y: number | null; sharpe3y: number | null; sortino3y: number | null
-  rolling3yPct: number | null; maxDd: number | null; sip5yXirr: number | null
+  cagr5y: number|null; sharpe3y: number|null; sortino3y: number|null
+  rolling3yPct: number|null; maxDd: number|null; sip5y: number|null
 }): number {
   let score = 0, w = 0
-  function add(v: number | null, weight: number, norm: (n: number) => number) {
-    if (v == null) return; score += norm(v) * weight; w += weight
+  const add = (v: number|null, weight: number, norm: (n:number)=>number) => {
+    if (v == null) return
+    score += Math.min(100, Math.max(0, norm(v))) * weight; w += weight
   }
-  add(p.cagr5y,       25, v => Math.min(100, Math.max(0, v / 20 * 100)))
-  add(p.sharpe3y,     20, v => Math.min(100, Math.max(0, (v + 1) / 3 * 100)))
-  add(p.sortino3y,    15, v => Math.min(100, Math.max(0, (v + 1) / 4 * 100)))
-  add(p.rolling3yPct, 20, v => Math.min(100, Math.max(0, v)))
-  add(p.maxDd,        10, v => Math.min(100, Math.max(0, (v + 50) / 50 * 100)))
-  add(p.sip5yXirr,    10, v => Math.min(100, Math.max(0, v / 20 * 100)))
+  add(p.cagr5y,       25, v => v / 20 * 100)
+  add(p.sharpe3y,     20, v => (v + 1) / 3 * 100)
+  add(p.sortino3y,    15, v => (v + 1) / 4 * 100)
+  add(p.rolling3yPct, 20, v => v)
+  add(p.maxDd,        10, v => (v + 50) / 50 * 100)
+  add(p.sip5y,        10, v => v / 20 * 100)
   return w > 0 ? Math.round(score / w * 100) / 100 : 0
 }
 
-function progressBar(current: number, total: number, width = 40): string {
-  const pct = current / total, filled = Math.round(width * pct)
-  return `[${'█'.repeat(filled)}${'░'.repeat(width - filled)}] ${String(current).padStart(4)}/${total} (${Math.round(pct * 100)}%)`
+function progressBar(cur: number, total: number, w = 40): string {
+  const pct = cur / total, filled = Math.round(w * pct)
+  return `[${'█'.repeat(filled)}${'░'.repeat(w - filled)}] ${String(cur).padStart(4)}/${total} (${Math.round(pct*100)}%)`
 }
 
 async function upsertChunked(table: string, records: object[], onConflict: string) {
   for (let i = 0; i < records.length; i += CHUNK) {
-    const { error } = await supabase
-      .from(table).upsert(records.slice(i, i + CHUNK) as any, { onConflict })
-    if (error) console.error(`  Upsert error on ${table}:`, error.message)
+    const { error } = await supabase.from(table).upsert(records.slice(i, i+CHUNK) as any, { onConflict })
+    if (error) console.error(`\n  ⚠️  ${table}: ${error.message}`)
   }
 }
 
-// ── Main ───────────────────────────────────────────────────────────────────────
-
 async function main() {
   console.log('\n╔══════════════════════════════════════════════════════╗')
-  console.log('║   MF Platform — ENGINE 3: COMPUTE METRICS           ║')
-  console.log('║   Live NAV mode — no nav_history stored in DB       ║')
+  console.log('║   MF Platform — COMPUTE METRICS                     ║')
+  console.log('╠══════════════════════════════════════════════════════╣')
+  console.log('║   RF=7%  |  √252  |  Simple returns  |  Skip >10%  ║')
   console.log('╚══════════════════════════════════════════════════════╝')
-  console.log(`  Schemes : ${ALL_CODES.length} (curated list)`)
   console.log(`  Started : ${new Date().toLocaleString('en-IN')}\n`)
 
-  // Load category map
+  const db    = await openDb()
+  const codes = getAllCodes(db)
+  console.log(`  Schemes in nav.db : ${codes.length}\n`)
+
+  // Load category map from Supabase
   const categoryMap: Record<number, string> = {}
-  for (let i = 0; i < ALL_CODES.length; i += 1000) {
-    const { data } = await supabase.from('schemes').select('scheme_code, category').in('scheme_code', ALL_CODES.slice(i, i + 1000))
+  for (let i = 0; i < codes.length; i += 1000) {
+    const { data } = await supabase.from('schemes').select('scheme_code, category').in('scheme_code', codes.slice(i, i+1000))
     if (data) for (const s of data) categoryMap[s.scheme_code] = s.category ?? 'Other'
   }
 
-  const startTime = Date.now()
+  const startTime  = Date.now()
   const allRolling: object[] = [], allRisk: object[] = [], allSip: object[] = []
-  const allScores = new Map<number, any>()
+  const allScores  = new Map<number, any>()
   let computed = 0, skipped = 0, errors = 0
 
-  for (let i = 0; i < ALL_CODES.length; i++) {
-    const code = ALL_CODES[i]
+  for (let i = 0; i < codes.length; i++) {
+    const code = codes[i]
     try {
-      const data = await fetchNav(code)
-      await sleep(DELAY)
+      const data = getNav(db, code)
+      if (data.length < 60) { skipped++; process.stdout.write(`\r  ${progressBar(i+1, codes.length)}  skipped:${skipped}`); continue }
 
-      if (!data || data.length < 30) {
-        skipped++
-        process.stdout.write(`\r  ${progressBar(i + 1, ALL_CODES.length)}  skipped: ${skipped}`)
-        continue
-      }
-
-      const latest    = data[data.length - 1]
-      const latestNav = Number(latest.nav)
+      const latest    = data[data.length-1]
+      const latestNav = latest.nav
       const latestDt  = new Date(latest.nav_date)
       const yearsData = (latestDt.getTime() - new Date(data[0].nav_date).getTime()) / (365.25 * 86_400_000)
       const now       = new Date().toISOString()
+      const rets      = dailyReturns(data)
 
       // Rolling returns
       const rollingRecs: any[] = []
       for (const yrs of [1, 3, 5, 7, 10] as const) {
-        if (yearsData < yrs * 1.1) continue
+        if (yearsData < yrs + 0.5) continue
         const r = rollingReturns(data, yrs)
         if (!r) continue
-        const rec = {
-          scheme_code: code, rolling_period_years: yrs,
-          avg_rolling_return: r.avg, median_rolling_return: r.median,
-          min_rolling_return: r.min, max_rolling_return: r.max,
-          positive_return_pct: r.positivePct, benchmark_outperform_pct: null,
-          consistency_score: r.positivePct, data_points: r.dataPoints, computed_at: now,
-        }
+        const rec = { scheme_code:code, rolling_period_years:yrs, avg_rolling_return:r.avg,
+          median_rolling_return:r.median, min_rolling_return:r.min, max_rolling_return:r.max,
+          positive_return_pct:r.positivePct, benchmark_outperform_pct:null,
+          consistency_score:r.positivePct, data_points:r.dataPoints, computed_at:now }
         allRolling.push(rec); rollingRecs.push(rec)
       }
 
@@ -1826,20 +227,21 @@ async function main() {
       const riskRecs: any[] = []
       for (const yrs of [1, 3, 5, 10] as const) {
         if (yearsData < yrs * 0.9) continue
-        const cutoff = ago(yrs, latestDt)
-        const slice  = data.filter(r => new Date(r.nav_date) >= cutoff)
+        const cutoff    = ago(yrs, latestDt)
+        const slice     = data.filter(r => new Date(r.nav_date) >= cutoff)
         if (slice.length < 30) continue
-        const vol = volatility(slice), mdd = maxDrawdown(slice)
-        const dd  = downsideDev(slice), ui = ulcerIndex(slice)
-        const c   = cagr(navAt(slice, cutoff, 30), latestNav, yrs)
-        const sh  = (c !== null && vol && vol > 0) ? Math.round((c - RF) / vol * 100) / 100 : null
-        const so  = (c !== null && dd  && dd  > 0) ? Math.round((c - RF) / dd  * 100) / 100 : null
-        const cal = (c !== null && mdd && mdd < 0) ? Math.round(c / Math.abs(mdd) * 100) / 100 : null
-        const rec = {
-          scheme_code: code, period_years: yrs, volatility: vol,
-          sharpe_ratio: sh, sortino_ratio: so, max_drawdown: mdd,
-          downside_deviation: dd, ulcer_index: ui, calmar_ratio: cal, computed_at: now,
-        }
+        const sliceRets = dailyReturns(slice)
+        const vol  = volatility(sliceRets)
+        const mdd  = maxDrawdown(slice)
+        const dd   = downsideDev(sliceRets)
+        const ui   = ulcerIndex(slice)
+        const c    = cagr(navAt(slice, cutoff, 30), latestNav, yrs)
+        const sh   = (c !== null && vol && vol > 0) ? Math.round((c - RF) / vol * 100) / 100 : null
+        const so   = (c !== null && dd  && dd  > 0) ? Math.round((c - RF) / dd  * 100) / 100 : null
+        const cal  = (c !== null && mdd && mdd < 0) ? Math.round(c / Math.abs(mdd) * 100) / 100 : null
+        const rec = { scheme_code:code, period_years:yrs, volatility:vol, sharpe_ratio:sh,
+          sortino_ratio:so, max_drawdown:mdd, downside_deviation:dd, ulcer_index:ui,
+          calmar_ratio:cal, computed_at:now }
         allRisk.push(rec); riskRecs.push(rec)
       }
 
@@ -1849,44 +251,40 @@ async function main() {
         if (yearsData < yrs * 0.9) continue
         const xirr = sipXirr(data, yrs)
         if (xirr === null) continue
-        const rec = {
-          scheme_code: code, sip_period_years: yrs,
-          avg_sip_xirr: xirr, median_sip_xirr: xirr,
-          best_sip_xirr: null, worst_sip_xirr: null,
-          positive_sip_pct: xirr > 0 ? 100 : 0,
-          rolling_sip_consistency: null, computed_at: now,
-        }
+        const rec = { scheme_code:code, sip_period_years:yrs, avg_sip_xirr:xirr,
+          median_sip_xirr:xirr, best_sip_xirr:null, worst_sip_xirr:null,
+          positive_sip_pct:xirr > 0 ? 100 : 0, rolling_sip_consistency:null, computed_at:now }
         allSip.push(rec); sipRecs.push(rec)
       }
 
-      // Score
+      // Composite score
       const c5y    = cagr(navAt(data, ago(5, latestDt), 30), latestNav, 5)
       const risk3y = riskRecs.find(r => r.period_years === 3)
       const roll3y = rollingRecs.find(r => r.rolling_period_years === 3)
       const sip5y  = sipRecs.find(s => s.sip_period_years === 5)
       const score  = compositeScore({
-        cagr5y: c5y, sharpe3y: risk3y?.sharpe_ratio ?? null,
-        sortino3y: risk3y?.sortino_ratio ?? null,
-        rolling3yPct: roll3y?.positive_return_pct ?? null,
-        maxDd: risk3y?.max_drawdown ?? null, sip5yXirr: sip5y?.avg_sip_xirr ?? null,
-      })
+        cagr5y:p.cagr5y, sharpe3y:risk3y?.sharpe_ratio??null,
+        sortino3y:risk3y?.sortino_ratio??null,
+        rolling3yPct:roll3y?.positive_return_pct??null,
+        maxDd:risk3y?.max_drawdown??null, sip5y:sip5y?.avg_sip_xirr??null,
+      } as any)
 
       allScores.set(code, {
-        scheme_code: code, overall_score: score,
-        rolling_return_score: roll3y ? Math.min(100, Math.max(0, roll3y.avg_rolling_return / 20 * 100)) : null,
-        risk_score:           risk3y ? Math.min(100, Math.max(0, ((risk3y.sharpe_ratio ?? 0) + 1) / 3 * 100)) : null,
+        scheme_code:code, overall_score:score,
+        rolling_return_score: roll3y ? Math.min(100,Math.max(0,roll3y.avg_rolling_return/20*100)) : null,
+        risk_score:           risk3y ? Math.min(100,Math.max(0,((risk3y.sharpe_ratio??0)+1)/3*100)) : null,
         consistency_score:    roll3y?.positive_return_pct ?? null,
-        sip_score:            sip5y  ? Math.min(100, Math.max(0, sip5y.avg_sip_xirr / 20 * 100)) : null,
-        drawdown_score:       risk3y ? Math.min(100, Math.max(0, ((risk3y.max_drawdown ?? 0) + 50) / 50 * 100)) : null,
-        advisor_preference_boost: 0, rank_in_category: null, computed_at: now,
+        sip_score:            sip5y  ? Math.min(100,Math.max(0,sip5y.avg_sip_xirr/20*100)) : null,
+        drawdown_score:       risk3y ? Math.min(100,Math.max(0,((risk3y.max_drawdown??0)+50)/50*100)) : null,
+        advisor_preference_boost:0, rank_in_category:null, computed_at:now,
       })
 
       computed++
-      process.stdout.write(`\r  ${progressBar(i + 1, ALL_CODES.length)}  score: ${score.toFixed(0).padStart(3)}`)
-    } catch {
-      errors++
-    }
+      process.stdout.write(`\r  ${progressBar(i+1, codes.length)}  score:${score.toFixed(0).padStart(3)}`)
+    } catch { errors++ }
   }
+
+  db.close()
 
   // Category ranks
   console.log('\n\n  📊 Assigning category ranks...')
@@ -1896,32 +294,27 @@ async function main() {
     if (!byCategory[cat]) byCategory[cat] = []
     byCategory[cat].push(code)
   }
-  for (const codes of Object.values(byCategory)) {
-    codes
-      .sort((a, b) => (allScores.get(b)?.overall_score ?? 0) - (allScores.get(a)?.overall_score ?? 0))
-      .forEach((code, idx) => { if (allScores.has(code)) allScores.get(code).rank_in_category = idx + 1 })
+  for (const cats of Object.values(byCategory)) {
+    cats.sort((a,b) => (allScores.get(b)?.overall_score??0) - (allScores.get(a)?.overall_score??0))
+        .forEach((code,idx) => { if (allScores.has(code)) allScores.get(code).rank_in_category = idx+1 })
   }
 
-  console.log('  📥 Upserting rolling_return_metrics...')
+  console.log('  📥 Upserting to Supabase...')
   await upsertChunked('rolling_return_metrics', allRolling, 'scheme_code,rolling_period_years')
-  console.log('  📥 Upserting risk_metrics...')
-  await upsertChunked('risk_metrics', allRisk, 'scheme_code,period_years')
-  console.log('  📥 Upserting sip_metrics...')
-  await upsertChunked('sip_metrics', allSip, 'scheme_code,sip_period_years')
-  console.log('  📥 Upserting fund_scores...')
-  await upsertChunked('fund_scores', [...allScores.values()], 'scheme_code')
+  await upsertChunked('risk_metrics',            allRisk,    'scheme_code,period_years')
+  await upsertChunked('sip_metrics',             allSip,     'scheme_code,sip_period_years')
+  await upsertChunked('fund_scores',             [...allScores.values()], 'scheme_code')
 
   const elapsed = Math.round((Date.now() - startTime) / 1000)
   console.log('\n╔══════════════════════════════════════════════════════╗')
   console.log('║  COMPUTE COMPLETE                                    ║')
   console.log('╠══════════════════════════════════════════════════════╣')
-  console.log(`║  Computed      : ${String(computed).padEnd(36)}║`)
-  console.log(`║  Skipped       : ${String(skipped).padEnd(36)}║`)
-  console.log(`║  Errors        : ${String(errors).padEnd(36)}║`)
-  console.log(`║  Rolling recs  : ${String(allRolling.length).padEnd(36)}║`)
-  console.log(`║  Risk recs     : ${String(allRisk.length).padEnd(36)}║`)
-  console.log(`║  SIP recs      : ${String(allSip.length).padEnd(36)}║`)
-  console.log(`║  Time elapsed  : ${String(elapsed + 's').padEnd(36)}║`)
+  console.log(`║  Computed     : ${String(computed).padEnd(37)}║`)
+  console.log(`║  Skipped      : ${String(skipped).padEnd(37)}║`)
+  console.log(`║  Rolling recs : ${String(allRolling.length).padEnd(37)}║`)
+  console.log(`║  Risk recs    : ${String(allRisk.length).padEnd(37)}║`)
+  console.log(`║  SIP recs     : ${String(allSip.length).padEnd(37)}║`)
+  console.log(`║  Time elapsed : ${String(elapsed+'s').padEnd(37)}║`)
   console.log('╚══════════════════════════════════════════════════════╝')
   console.log('\n  ✅ All analytics ready. Run "npm run dev"\n')
 }
